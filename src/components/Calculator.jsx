@@ -2,9 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Calculator, Upload, FileText, DollarSign, Calendar, Percent, User, CreditCard, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 
-// Set worker source using unpkg for better stability with Vite
-// Using .mjs as pdfjs-dist v5+ uses ES modules for workers
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+// Força o uso do Worker via CDN para evitar erros de caminho local
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 export default function CalculatorComponent() {
     const [client, setClient] = useState({ nome: '', cpf: '' });
@@ -38,15 +37,21 @@ export default function CalculatorComponent() {
             let textContent = '';
 
             if (file.type === 'application/pdf') {
-                const arrayBuffer = await file.arrayBuffer();
-                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                // Create a URL for the file to avoid array buffer issues
+                const url = URL.createObjectURL(file);
+                const loadingTask = pdfjsLib.getDocument(url);
+                const pdf = await loadingTask.promise;
 
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
                     const textContentItem = await page.getTextContent();
-                    const pageText = textContentItem.items.map(item => item.str).join(' ');
+                    // Join items with a newline to prevent table columns from merging
+                    const pageText = textContentItem.items.map(item => item.str + '\n').join('');
                     textContent += pageText + '\n';
                 }
+
+                // Clean up
+                URL.revokeObjectURL(url);
             } else {
                 // Assume text file
                 textContent = await new Promise((resolve, reject) => {
@@ -61,7 +66,9 @@ export default function CalculatorComponent() {
             parseContent(textContent);
         } catch (error) {
             console.error('Error processing file:', error);
-            setUploadError('Erro ao processar o arquivo. Se o PDF falhar, tente converter para .TXT e faça o upload novamente.');
+            const errorMsg = 'Erro técnico no PDF: ' + error.message;
+            window.alert(errorMsg);
+            setUploadError(errorMsg);
         } finally {
             setIsProcessing(false);
         }
