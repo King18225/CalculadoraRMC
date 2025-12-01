@@ -1,0 +1,12 @@
+
+HISTÓRICO DE CRÉDITOS - HISCRE
+
+Benefício: 123.456.789-0
+Nome: JOÃO DA SILVA
+
+Competência   Código   Descrição                    Valor
+01/01/2023    217      EMPRESTIMO SOBRE A RMC       150,00
+01/02/2023    217      EMPRESTIMO SOBRE A RMC       150,00
+01/03/2023    217      EMPRESTIMO SOBRE A RMC       150,00
+01/04/2023    300      OUTRO DESCONTO               50,00
+01/04/2023    217      EMPRESTIMO SOBRE A RMC       150,00
