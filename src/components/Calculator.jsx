@@ -170,6 +170,7 @@ export default function CalculatorDashboard() {
         let idCounter = 1;
         let currentCompetenceDate = null;
 
+        // Regex poderosa para datas (DD/MM/AAAA ou MM/AAAA)
         const competenceRegex = /(\d{1,2}\s*[\/\.]\s*\d{4})/;
         const valueRegex = /(\d{1,3}(?:\.\d{3})*,\d{2})/;
 
@@ -177,54 +178,60 @@ export default function CalculatorDashboard() {
             const rawLine = line.trim();
             if (!rawLine) return;
 
-            // 1. SANITIZAÇÃO
+            // 1. SANITIZAÇÃO DE CARACTERES
             let cleanLine = rawLine.toUpperCase();
             cleanLine = cleanLine.replace(/([0-9\/\s])O([0-9\/\s])/g, '$10$2');
             cleanLine = cleanLine.replace(/([0-9\/\s])[Il]([0-9\/\s])/g, '$11$2');
             cleanLine = cleanLine.replace(/\s+/g, ' ');
 
-            // 2. FILTRO "KILL-SWITCH" (O que nunca deve passar)
-            // Bloqueia empréstimo comum (216) e margem reservada
-            if (cleanLine.includes('216') ||
-                (cleanLine.includes('CONSIGNACAO') && cleanLine.includes('EMPRESTIMO') && !cleanLine.includes('RMC')) ||
-                cleanLine.includes('MARGEM RESERVADA')) {
-                return; // Pula a linha imediatamente
-            }
+            // 2. BLOQUEIO DE CABEÇALHOS E DATAS DE IMPRESSÃO (CRÍTICO)
+            const isInvalidLine =
+                cleanLine.includes('INICIAL') ||
+                cleanLine.includes('FINAL') ||
+                cleanLine.includes('INICIO') ||
+                cleanLine.includes('CONCESSAO') ||
+                cleanLine.includes('NASCIMENTO') ||
+                cleanLine.includes('DATA') ||
+                cleanLine.includes('BENEFICIO') ||
+                cleanLine.includes('MARGEM') ||
+                cleanLine.includes('RESERVADA') ||
+                cleanLine.includes('216') ||
+                cleanLine.includes('CONSIGNACAO EMPRESTIMO') ||
+                cleanLine.includes('PAGINA') ||
+                cleanLine.includes('INSTITUTO') ||
+                cleanLine.includes('PREVIDENCIA') ||
+                cleanLine.includes('HISTORICO') ||
+                cleanLine.includes('GERADO') ||
+                /\d{2}:\d{2}/.test(cleanLine); // Bloqueia horário (ex: 21:39:18)
 
-            // 3. DETECÇÃO DE PAGAMENTO (O REI)
-            const hasCode217 = cleanLine.includes('217');
-            const hasRMC = cleanLine.includes('RMC') || cleanLine.includes('RESERVA');
-
-            // 4. DETECÇÃO DE DATA (Contexto)
-            // Só atualiza a data se NÃO for uma linha de cabeçalho óbvio E não tiver conflito
-            // Mas se for uma linha de pagamento válida (hasCode217), tentamos ler a data nela mesmo assim
-            const isGenericHeader =
-                cleanLine.includes('INICIAL') || cleanLine.includes('FINAL') ||
-                cleanLine.includes('INICIO') || cleanLine.includes('CONCESSAO') ||
-                cleanLine.includes('NASCIMENTO');
-
-            // Tenta ler data (prioridade para a linha atual)
-            if (competenceRegex.test(cleanLine) && !isGenericHeader) {
+            // 3. TENTA LER DATA VÁLIDA NA LINHA
+            // Só aceita data se NÃO for linha inválida
+            if (!isInvalidLine && competenceRegex.test(cleanLine)) {
                 const dateMatch = cleanLine.match(competenceRegex);
                 if (dateMatch) {
                     const dateStr = dateMatch[1].replace(/\s/g, '').replace(/\./g, '/');
                     const parts = dateStr.split('/');
                     let month, year;
+
+                    // Suporte a DD/MM/AAAA e MM/AAAA
                     if (parts.length === 3) { month = parts[1]; year = parts[2]; }
                     else if (parts.length === 2) { month = parts[0]; year = parts[1]; }
 
                     if (month && year) {
                         const y = parseInt(year);
-                        if (y >= 2000 && y <= 2050) {
+                        // Filtro de ano estrito para evitar pegar ano de nascimento ou futuro
+                        if (y >= 2000 && y <= 2030) {
                             currentCompetenceDate = `${year}-${month.padStart(2, '0')}-01`;
                         }
                     }
                 }
             }
 
-            // 5. EXTRAÇÃO
-            // Se tem 217/RMC, nós queremos essa linha, mesmo que tenha palavras de cabeçalho "sujas" (ex: Data)
-            if (hasCode217 || hasRMC) {
+            // 4. EXTRAÇÃO DO VALOR (Filtro 217)
+            const hasCode217 = cleanLine.includes('217');
+            const hasRMC = cleanLine.includes('RMC');
+
+            if ((hasCode217 || hasRMC) && !isInvalidLine) {
                 const valueMatch = cleanLine.match(valueRegex);
 
                 if (valueMatch) {
@@ -232,11 +239,12 @@ export default function CalculatorDashboard() {
                     const value = parseFloat(rawValue.replace(',', '.'));
 
                     if (!isNaN(value) && value > 10 && value < 10000) {
-                        // Salva como string BRL para consistência com o parseCurrencyToFloat
+                        // ADICIONA À LISTA
+                        // Se currentCompetenceDate for null (órfão), será corrigido depois
                         extractedPayments.push({
                             id: idCounter++,
                             dataCompetencia: currentCompetenceDate,
-                            valorLiquido: value.toLocaleString('pt-BR', { minimumFractionDigits: 2 }), // Salva "112,35"
+                            valorLiquido: value.toFixed(2),
                             originalLine: cleanLine
                         });
                     }
@@ -245,99 +253,107 @@ export default function CalculatorDashboard() {
         });
 
         if (extractedPayments.length > 0) {
-            // --- 6. INTERPOLAÇÃO (GAP FILLING) ---
+            // --- 5. INTERPOLAÇÃO INTELIGENTE (CORREÇÃO DE GAPS) ---
+
+            // Passo A: Remove duplicatas EXATAS de leitura (mesma linha lida 2x na quebra de pág)
+            // Usa um Map para manter apenas a última ocorrência ou primeira (tanto faz se forem iguais)
+            // Mas cuidado: valores iguais em meses diferentes DEVEM ficar.
+            // A chave deve ser apenas o índice se não tiver data, então pulamos isso por enquanto e confiamos na interpolação.
+
+            // Passo B: Acha a primeira data firme
             let firstValidIndex = extractedPayments.findIndex(p => p.dataCompetencia !== null);
 
             if (firstValidIndex === -1) {
-                // Fallback: Se não achou data nenhuma, assume hoje como a última
+                // Se tudo falhar, assume data de hoje retroativa
                 const today = new Date();
-                const lastIndex = extractedPayments.length - 1;
+                firstValidIndex = extractedPayments.length - 1;
                 const isoToday = today.toISOString().split('T')[0].substring(0, 8) + '01';
-                extractedPayments[lastIndex].dataCompetencia = isoToday;
-                firstValidIndex = lastIndex;
+                extractedPayments[firstValidIndex].dataCompetencia = isoToday;
             }
 
-            // Backfill
+            // Passo C: Backfill (Preenche para trás)
             for (let i = firstValidIndex - 1; i >= 0; i--) {
-                const nextDate = new Date(extractedPayments[i + 1].dataCompetencia + 'T12:00:00');
-                nextDate.setMonth(nextDate.getMonth() - 1);
-
-                const y = nextDate.getFullYear();
-                const m = String(nextDate.getMonth() + 1).padStart(2, '0');
-                extractedPayments[i].dataCompetencia = `${y}-${m}-01`;
+                const nextDate = new Date(extractedPayments[i + 1].dataCompetencia);
+                nextDate.setMonth(nextDate.getMonth() - 1); // -1 mês
+                const isoDate = new Date(nextDate.valueOf() + nextDate.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+                extractedPayments[i].dataCompetencia = isoDate.substring(0, 8) + '01';
             }
 
-            // Forward Fill
+            // Passo D: Forward Fill (Preenche para frente)
             for (let i = firstValidIndex + 1; i < extractedPayments.length; i++) {
-                if (extractedPayments[i].dataCompetencia === null) {
-                    const prevDate = new Date(extractedPayments[i - 1].dataCompetencia + 'T12:00:00');
-                    prevDate.setMonth(prevDate.getMonth() + 1);
+                // Se a data for nula OU se for igual à anterior (erro de data grudenta), forçamos o próximo mês
+                // Isso resolve o problema de datas repetidas e gaps
+                const prevDate = new Date(extractedPayments[i - 1].dataCompetencia);
+                const currDate = extractedPayments[i].dataCompetencia ? new Date(extractedPayments[i].dataCompetencia) : null;
 
-                    const y = prevDate.getFullYear();
-                    const m = String(prevDate.getMonth() + 1).padStart(2, '0');
-                    extractedPayments[i].dataCompetencia = `${y}-${m}-01`;
+                // Se não tem data, ou se a data é igual/menor que a anterior (impossível em RMC), corrige
+                if (!currDate || currDate <= prevDate) {
+                    const newDate = new Date(prevDate);
+                    newDate.setMonth(newDate.getMonth() + 1); // +1 mês
+                    const isoDate = new Date(newDate.valueOf() + newDate.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+                    extractedPayments[i].dataCompetencia = isoDate.substring(0, 8) + '01';
                 }
             }
 
-            // Ordena final
+            // Ordena e Salva
             extractedPayments.sort((a, b) => new Date(a.dataCompetencia) - new Date(b.dataCompetencia));
             setPayments(extractedPayments);
 
-            // --- 7. CONTRATO ---
-            // Pega o primeiro valor (mais antigo)
+            // Define contrato com primeiro valor
             const firstValue = extractedPayments.length > 0 ? extractedPayments[0].valorLiquido : '';
-
-            // Formata para exibir no input bonito (R$ 112,35)
-            // firstValue já está como "112,35" (string BRL sem R$)
-            const firstValueFloat = parseCurrencyToFloat(firstValue);
-            const formattedValue = firstValueFloat.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-
-            setContract(prev => ({
-                ...prev,
-                qtdParcelas: extractedPayments.length,
-                valorParcela: formattedValue
-            }));
+            setContract(prev => ({ ...prev, qtdParcelas: extractedPayments.length, valorParcela: firstValue }));
 
             setUploadError(null);
         } else {
-            setUploadError('Nenhum pagamento RMC encontrado (Verifique se há código 217).');
+            setUploadError('Nenhum pagamento 217 encontrado.');
         }
     };
 
-    // --- CÁLCULO (Atualizado: Inversão de Juros + Validações + Sanitização BRL) ---
     const calculate = () => {
-        // Sanitiza os inputs BRL para Float JS
+        // 1. Sanitiza os INPUTS do usuário (que estão em formato BRL visual: "3.401,00")
         const valorOriginal = parseCurrencyToFloat(contract.valorOriginal);
-        const taxa = parseFloat(contract.taxaJuros) / 100;
 
-        // VALIDAÇÃO CRÍTICA
+        // Se a taxa vier do input visual, sanitiza. Se vier da API (number), mantém.
+        let taxaVal = contract.taxaJuros;
+        if (typeof taxaVal === 'string') {
+            taxaVal = taxaVal.replace(',', '.');
+        }
+        const taxa = parseFloat(taxaVal) / 100;
+
+        // Validação
         if (!valorOriginal || valorOriginal <= 0) {
-            alert('ATENÇÃO: Você precisa informar o "Valor Original Disponibilizado" (Valor do Empréstimo) corretamente.');
+            alert('Por favor, informe o Valor do Empréstimo (Valor Original) corretamente.');
             return;
         }
-        if (!contract.taxaJuros) {
-            alert('Informe a Taxa de Juros.'); return;
-        }
+
         if (payments.length === 0) {
-            alert('Carregue o arquivo de pagamentos.'); return;
+            alert('Nenhum pagamento carregado.');
+            return;
         }
 
         let saldo = valorOriginal;
         const newEvolution = [];
         let totalPago = 0;
 
+        // Ordena Cronologicamente
         const sortedPayments = [...payments].sort((a, b) => new Date(a.dataCompetencia) - new Date(b.dataCompetencia));
 
         sortedPayments.forEach((payment) => {
-            // Sanitiza o valor do pagamento (que agora está em formato BRL string)
-            const valorPago = parseCurrencyToFloat(payment.valorLiquido);
+            // --- CORREÇÃO CRÍTICA AQUI ---
+            // O valorLiquido vem do OCR como "112.35" (formato JS padrão). 
+            // NÃO usar parseCurrencyToFloat aqui, pois ele remove o ponto achando que é milhar.
+            const valorPago = parseFloat(payment.valorLiquido);
+            // -----------------------------
+
             totalPago += valorPago;
 
             const saldoAnterior = saldo;
             const juros = saldoAnterior * taxa;
             const amortizacao = valorPago - juros;
+
             saldo = saldoAnterior - amortizacao;
 
+            // Lógica de Restituição (Dobra)
             let baseRestituicao = 0;
             if (saldoAnterior < 0) {
                 baseRestituicao = valorPago;
@@ -365,9 +381,11 @@ export default function CalculatorDashboard() {
             });
         });
 
+        // Totais Finais
         const saldoFinal = saldo;
         const totalDobras = newEvolution.reduce((acc, cur) => acc + cur.valorRestituir, 0);
 
+        // Se saldo final é negativo (credor), o cliente recebe o valor absoluto + as dobras
         let valorFinalRestituir = 0;
         if (saldoFinal < 0) {
             valorFinalRestituir = Math.abs(saldoFinal) + totalDobras;
@@ -596,7 +614,7 @@ export default function CalculatorDashboard() {
                 .input-group label { font-size: 0.9rem; color: #666; margin-bottom: 0.5rem; font-weight: 500; }
                 .input-icon-wrapper { position: relative; display: flex; align-items: center; }
                 .input-icon { position: absolute; left: 12px; color: #9ca3af; width: 18px; height: 18px; }
-                input[type="text"], input[type="number"], input[type="date"] { width: 100%; padding: 0.75rem 1rem; padding-left: 2.5rem; background-color: var(--bg-input); border: 1px solid transparent; border-radius: 6px; font-size: 1rem; }
+                input[type="text"], input[type="number"], input[type="date"] { width: 100%; padding: 0.75rem 1rem; padding-left: 2.5rem; background-color: var(--bg-input); border: 1px solid transparent; border-radius: 6px; font-size: 1rem; color: var(--text-dark); }
                 .input-group input:not(input[type="date"]){ padding-left: 1rem; }
                 .input-icon-wrapper input { padding-left: 2.5rem !important; }
                 input:focus { background-color: #fff; border-color: var(--primary-color); outline: none; box-shadow: 0 0 0 3px rgba(156, 192, 148, 0.2); }

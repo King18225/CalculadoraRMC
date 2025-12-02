@@ -18,9 +18,9 @@ const styles = StyleSheet.create({
     // Tabela
     tableHeader: { flexDirection: 'row', backgroundColor: '#333', color: '#fff', padding: 4, fontSize: 8, fontWeight: 'bold' },
     tableRow: { flexDirection: 'row', borderBottom: '1px solid #eee', padding: 4, fontSize: 8 },
-    colDate: { width: '12%' },
-    colMoney: { width: '14%', textAlign: 'right' },
-    colIndex: { width: '6%', textAlign: 'center' },
+    colDate: { width: '15%' },
+    colMoney: { width: '15%', textAlign: 'right' },
+    colIndex: { width: '10%', textAlign: 'center' },
 
     // Totais
     summaryBox: { border: '1px solid #9cc094', padding: 10, marginTop: 10, borderRadius: 4 },
@@ -103,7 +103,6 @@ export const ReportPDF = ({ client, contract, summary, evolution }) => (
                     <Text style={styles.colMoney}>Valor Pago</Text>
                     <Text style={styles.colMoney}>Amortização</Text>
                     <Text style={styles.colMoney}>Saldo Atual</Text>
-                    <Text style={styles.colMoney}>Restituição</Text>
                 </View>
 
                 {/* Linhas */}
@@ -118,7 +117,6 @@ export const ReportPDF = ({ client, contract, summary, evolution }) => (
                             {formatCurrency(row.amortizacao)}
                         </Text>
                         <Text style={styles.colMoney}>{formatCurrency(row.saldoAtual)}</Text>
-                        <Text style={styles.colMoney}>{formatCurrency(row.valorRestituir)}</Text>
                     </View>
                 ))}
             </View>
