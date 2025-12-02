@@ -1,192 +1,357 @@
 import React, { useState, useEffect } from 'react';
-import { Calculator, Upload, FileText, DollarSign, Calendar, Percent, User, CreditCard, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
+import { Calculator, Upload, FileText, DollarSign, Calendar, Percent, User, RefreshCw, CheckCircle, AlertCircle, Printer, HelpCircle, File } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
+import Tesseract from 'tesseract.js';
+import { BlobProvider } from '@react-pdf/renderer';
+import { ReportPDF } from './ReportPDF';
 
-// Força o uso do Worker via CDN para evitar erros de caminho local
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+// Configuração do Worker (Mantida do UNPKG para evitar erros 404)
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
-export default function CalculatorComponent() {
+export default function CalculatorDashboard() {
+    // --- ESTADOS ---
     const [client, setClient] = useState({ nome: '', cpf: '' });
     const [contract, setContract] = useState({
         valorOriginal: '',
         dataInicio: '',
+        valorParcela: '',
+        qtdParcelas: '',
         taxaJuros: '',
         restituicaoDobro: false
     });
     const [payments, setPayments] = useState([]);
     const [evolution, setEvolution] = useState([]);
-    const [summary, setSummary] = useState({
-        totalPago: 0,
-        saldoDevedorAtual: 0,
-        valorRestituir: 0
-    });
+    const [summary, setSummary] = useState({ totalPago: 0, saldoDevedorAtual: 0, valorRestituir: 0 });
+
+    // Controles de UI
     const [isProcessing, setIsProcessing] = useState(false);
+    const [isFetchingRate, setIsFetchingRate] = useState(false);
+    const [progressStatus, setProgressStatus] = useState('');
     const [uploadError, setUploadError] = useState(null);
     const [debugText, setDebugText] = useState('');
+    const [fileName, setFileName] = useState(null);
 
+    // --- HELPER: FORMATAÇÃO MONETÁRIA (BRL) ---
+    const formatCurrencyInput = (value) => {
+        if (!value) return "";
+        // Remove tudo que não é dígito
+        const onlyDigits = value.replace(/\D/g, "");
+        if (!onlyDigits) return "";
+
+        // Converte para centavos e formata
+        const numberValue = Number(onlyDigits) / 100;
+        return numberValue.toLocaleString("pt-BR", {
+            style: "currency",
+            currency: "BRL"
+        });
+    };
+
+    // --- HELPER: PARSE PARA CÁLCULO ---
+    const parseCurrencyToFloat = (valueStr) => {
+        if (!valueStr) return 0;
+        if (typeof valueStr === 'number') return valueStr;
+        // Remove caracteres não numéricos exceto vírgula e ponto (mas ponto é milhar em BRL)
+        // Remove o símbolo R$, espaços e pontos de milhar
+        const cleanStr = valueStr.replace(/[R$\s.]/g, '').replace(',', '.');
+        return parseFloat(cleanStr);
+    };
+
+    // --- NOVO HANDLE CHANGE PARA INPUTS ---
+    const handleMoneyChange = (field, value) => {
+        const formatted = formatCurrencyInput(value);
+        setContract(prev => ({ ...prev, [field]: formatted }));
+    };
+
+    // --- 1. INTEGRAÇÃO BACEN ---
+    useEffect(() => {
+        const fetchBacenRate = async () => {
+            if (!contract.dataInicio) return;
+            if (contract.dataInicio.length !== 10) return;
+
+            setIsFetchingRate(true);
+            try {
+                const [year, month, day] = contract.dataInicio.split('-');
+                const formattedDate = `${day}/${month}/${year}`;
+
+                const response = await fetch(`https://api.bcb.gov.br/dados/serie/bcdata.sgs.25468/dados?formato=json&dataInicial=${formattedDate}&dataFinal=${formattedDate}`);
+                const data = await response.json();
+
+                if (data && data.length > 0) {
+                    const rate = data[0].valor;
+                    setContract(prev => ({ ...prev, taxaJuros: rate.replace(',', '.') }));
+                } else {
+                    const fallbackDate = `01/${month}/${year}`;
+                    const respFallback = await fetch(`https://api.bcb.gov.br/dados/serie/bcdata.sgs.25468/dados?formato=json&dataInicial=${fallbackDate}&dataFinal=${fallbackDate}`);
+                    const dataFallback = await respFallback.json();
+
+                    if (dataFallback && dataFallback.length > 0) {
+                        setContract(prev => ({ ...prev, taxaJuros: dataFallback[0].valor.replace(',', '.') }));
+                    }
+                }
+            } catch (error) {
+                console.error("Erro ao buscar taxa BACEN:", error);
+            } finally {
+                setIsFetchingRate(false);
+            }
+        };
+
+        const timeoutId = setTimeout(() => {
+            fetchBacenRate();
+        }, 1000);
+
+        return () => clearTimeout(timeoutId);
+    }, [contract.dataInicio]);
+
+    // --- 2. LÓGICA DE UPLOAD E OCR ---
     const handleFileUpload = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
+        setFileName(file.name);
         setIsProcessing(true);
         setUploadError(null);
         setPayments([]);
         setDebugText('');
+        setProgressStatus('Iniciando leitura...');
 
         try {
-            let textContent = '';
-
+            let fullTextContent = '';
             if (file.type === 'application/pdf') {
-                // Create a URL for the file to avoid array buffer issues
                 const url = URL.createObjectURL(file);
                 const loadingTask = pdfjsLib.getDocument(url);
                 const pdf = await loadingTask.promise;
+                const numPages = pdf.numPages;
 
-                for (let i = 1; i <= pdf.numPages; i++) {
+                for (let i = 1; i <= numPages; i++) {
+                    setProgressStatus(`Lendo pág ${i}/${numPages}...`);
                     const page = await pdf.getPage(i);
                     const textContentItem = await page.getTextContent();
-                    // Join items with a newline to prevent table columns from merging
-                    const pageText = textContentItem.items.map(item => item.str + '\n').join('');
-                    textContent += pageText + '\n';
-                }
+                    let pageText = textContentItem.items.map(item => item.str).join(' ');
 
-                // Clean up
+                    if (pageText.trim().length < 50) {
+                        setProgressStatus(`Pág ${i}: Imagem detectada. Aplicando OCR...`);
+                        const viewport = page.getViewport({ scale: 2.0 });
+                        const canvas = document.createElement('canvas');
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+                        const context = canvas.getContext('2d');
+                        await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+                        const { data: { text } } = await Tesseract.recognize(canvas, 'por');
+                        pageText = text;
+                    }
+                    fullTextContent += `\n--- [Pág ${i}] ---\n` + pageText;
+                }
                 URL.revokeObjectURL(url);
             } else {
-                // Assume text file
-                textContent = await new Promise((resolve, reject) => {
+                fullTextContent = await new Promise((resolve, reject) => {
                     const reader = new FileReader();
                     reader.onload = (e) => resolve(e.target.result);
                     reader.onerror = (e) => reject(e);
                     reader.readAsText(file);
                 });
             }
-
-            setDebugText(textContent);
-            parseContent(textContent);
+            setDebugText(fullTextContent);
+            parseContent(fullTextContent);
         } catch (error) {
-            console.error('Error processing file:', error);
-            const errorMsg = 'Erro técnico no PDF: ' + error.message;
-            window.alert(errorMsg);
-            setUploadError(errorMsg);
+            console.error(error);
+            setUploadError('Erro técnico: ' + error.message);
         } finally {
             setIsProcessing(false);
+            setProgressStatus('');
         }
     };
 
+    // --- 3. LÓGICA DE PARSE INTELIGENTE (Hierarquia: Kill-Switch > Imunidade 217 > Filtros Genéricos) ---
     const parseContent = (text) => {
         const lines = text.split(/\r?\n/);
         const extractedPayments = [];
+
         let idCounter = 1;
         let currentCompetenceDate = null;
 
-        // Regex patterns
-        // Date: MM/YYYY (e.g., 07/2020) - relaxed to just find the pattern
-        const competenceRegex = /(\d{2}\/\d{4})/;
-        // Value: 1.234,56 or 123,45 (captures the value at the end or middle of line)
+        const competenceRegex = /(\d{1,2}\s*[\/\.]\s*\d{4})/;
         const valueRegex = /(\d{1,3}(?:\.\d{3})*,\d{2})/;
 
         lines.forEach(line => {
-            const trimmedLine = line.trim();
+            const rawLine = line.trim();
+            if (!rawLine) return;
 
-            // 1. Detect Header/Competence Date
-            // Relaxed logic: If line starts with MM/YYYY, assume it's a competence date
-            // Also keep checking for "Competência" just in case, but prioritize the simple date pattern
-            if (/^\d{2}\/\d{4}/.test(trimmedLine) || (trimmedLine.includes('/') && trimmedLine.includes('Competência'))) {
-                const dateMatch = trimmedLine.match(competenceRegex);
+            // 1. SANITIZAÇÃO
+            let cleanLine = rawLine.toUpperCase();
+            cleanLine = cleanLine.replace(/([0-9\/\s])O([0-9\/\s])/g, '$10$2');
+            cleanLine = cleanLine.replace(/([0-9\/\s])[Il]([0-9\/\s])/g, '$11$2');
+            cleanLine = cleanLine.replace(/\s+/g, ' ');
+
+            // 2. FILTRO "KILL-SWITCH" (O que nunca deve passar)
+            // Bloqueia empréstimo comum (216) e margem reservada
+            if (cleanLine.includes('216') ||
+                (cleanLine.includes('CONSIGNACAO') && cleanLine.includes('EMPRESTIMO') && !cleanLine.includes('RMC')) ||
+                cleanLine.includes('MARGEM RESERVADA')) {
+                return; // Pula a linha imediatamente
+            }
+
+            // 3. DETECÇÃO DE PAGAMENTO (O REI)
+            const hasCode217 = cleanLine.includes('217');
+            const hasRMC = cleanLine.includes('RMC') || cleanLine.includes('RESERVA');
+
+            // 4. DETECÇÃO DE DATA (Contexto)
+            // Só atualiza a data se NÃO for uma linha de cabeçalho óbvio E não tiver conflito
+            // Mas se for uma linha de pagamento válida (hasCode217), tentamos ler a data nela mesmo assim
+            const isGenericHeader =
+                cleanLine.includes('INICIAL') || cleanLine.includes('FINAL') ||
+                cleanLine.includes('INICIO') || cleanLine.includes('CONCESSAO') ||
+                cleanLine.includes('NASCIMENTO');
+
+            // Tenta ler data (prioridade para a linha atual)
+            if (competenceRegex.test(cleanLine) && !isGenericHeader) {
+                const dateMatch = cleanLine.match(competenceRegex);
                 if (dateMatch) {
-                    const [month, year] = dateMatch[1].split('/');
-                    // Set to the first day of the month for consistency
-                    currentCompetenceDate = `${year}-${month}-01`;
+                    const dateStr = dateMatch[1].replace(/\s/g, '').replace(/\./g, '/');
+                    const parts = dateStr.split('/');
+                    let month, year;
+                    if (parts.length === 3) { month = parts[1]; year = parts[2]; }
+                    else if (parts.length === 2) { month = parts[0]; year = parts[1]; }
+
+                    if (month && year) {
+                        const y = parseInt(year);
+                        if (y >= 2000 && y <= 2050) {
+                            currentCompetenceDate = `${year}-${month.padStart(2, '0')}-01`;
+                        }
+                    }
                 }
             }
 
-            // 2. Detect Payment
-            if (trimmedLine.includes('217') || trimmedLine.includes('EMPRESTIMO SOBRE A RMC')) {
-                if (currentCompetenceDate) {
-                    const valueMatch = trimmedLine.match(valueRegex);
+            // 5. EXTRAÇÃO
+            // Se tem 217/RMC, nós queremos essa linha, mesmo que tenha palavras de cabeçalho "sujas" (ex: Data)
+            if (hasCode217 || hasRMC) {
+                const valueMatch = cleanLine.match(valueRegex);
 
-                    if (valueMatch) {
-                        // Parse value to float (remove dots, replace comma with dot)
-                        const valueStr = valueMatch[1].replace(/\./g, '').replace(',', '.');
-                        const value = parseFloat(valueStr);
+                if (valueMatch) {
+                    const rawValue = valueMatch[1].replace(/[^\d,]/g, '');
+                    const value = parseFloat(rawValue.replace(',', '.'));
 
+                    if (!isNaN(value) && value > 10 && value < 10000) {
+                        // Salva como string BRL para consistência com o parseCurrencyToFloat
                         extractedPayments.push({
                             id: idCounter++,
                             dataCompetencia: currentCompetenceDate,
-                            valorLiquido: value.toFixed(2),
-                            tipoLancamento: 'Pagamento (Extraído)',
-                            originalLine: trimmedLine
+                            valorLiquido: value.toLocaleString('pt-BR', { minimumFractionDigits: 2 }), // Salva "112,35"
+                            originalLine: cleanLine
                         });
                     }
                 }
             }
         });
 
-        if (extractedPayments.length === 0) {
-            setUploadError('Nenhum pagamento encontrado. Verifique o texto extraído abaixo para depuração.');
-        } else {
+        if (extractedPayments.length > 0) {
+            // --- 6. INTERPOLAÇÃO (GAP FILLING) ---
+            let firstValidIndex = extractedPayments.findIndex(p => p.dataCompetencia !== null);
+
+            if (firstValidIndex === -1) {
+                // Fallback: Se não achou data nenhuma, assume hoje como a última
+                const today = new Date();
+                const lastIndex = extractedPayments.length - 1;
+                const isoToday = today.toISOString().split('T')[0].substring(0, 8) + '01';
+                extractedPayments[lastIndex].dataCompetencia = isoToday;
+                firstValidIndex = lastIndex;
+            }
+
+            // Backfill
+            for (let i = firstValidIndex - 1; i >= 0; i--) {
+                const nextDate = new Date(extractedPayments[i + 1].dataCompetencia + 'T12:00:00');
+                nextDate.setMonth(nextDate.getMonth() - 1);
+
+                const y = nextDate.getFullYear();
+                const m = String(nextDate.getMonth() + 1).padStart(2, '0');
+                extractedPayments[i].dataCompetencia = `${y}-${m}-01`;
+            }
+
+            // Forward Fill
+            for (let i = firstValidIndex + 1; i < extractedPayments.length; i++) {
+                if (extractedPayments[i].dataCompetencia === null) {
+                    const prevDate = new Date(extractedPayments[i - 1].dataCompetencia + 'T12:00:00');
+                    prevDate.setMonth(prevDate.getMonth() + 1);
+
+                    const y = prevDate.getFullYear();
+                    const m = String(prevDate.getMonth() + 1).padStart(2, '0');
+                    extractedPayments[i].dataCompetencia = `${y}-${m}-01`;
+                }
+            }
+
+            // Ordena final
+            extractedPayments.sort((a, b) => new Date(a.dataCompetencia) - new Date(b.dataCompetencia));
             setPayments(extractedPayments);
+
+            // --- 7. CONTRATO ---
+            // Pega o primeiro valor (mais antigo)
+            const firstValue = extractedPayments.length > 0 ? extractedPayments[0].valorLiquido : '';
+
+            // Formata para exibir no input bonito (R$ 112,35)
+            // firstValue já está como "112,35" (string BRL sem R$)
+            const firstValueFloat = parseCurrencyToFloat(firstValue);
+            const formattedValue = firstValueFloat.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+            setContract(prev => ({
+                ...prev,
+                qtdParcelas: extractedPayments.length,
+                valorParcela: formattedValue
+            }));
+
+            setUploadError(null);
+        } else {
+            setUploadError('Nenhum pagamento RMC encontrado (Verifique se há código 217).');
         }
     };
 
+    // --- CÁLCULO (Atualizado: Inversão de Juros + Validações + Sanitização BRL) ---
     const calculate = () => {
-        if (!contract.valorOriginal || !contract.taxaJuros || payments.length === 0) {
-            alert('Por favor, preencha os dados do contrato e carregue os pagamentos.');
+        // Sanitiza os inputs BRL para Float JS
+        const valorOriginal = parseCurrencyToFloat(contract.valorOriginal);
+        const taxa = parseFloat(contract.taxaJuros) / 100;
+
+        // VALIDAÇÃO CRÍTICA
+        if (!valorOriginal || valorOriginal <= 0) {
+            alert('ATENÇÃO: Você precisa informar o "Valor Original Disponibilizado" (Valor do Empréstimo) corretamente.');
             return;
         }
+        if (!contract.taxaJuros) {
+            alert('Informe a Taxa de Juros.'); return;
+        }
+        if (payments.length === 0) {
+            alert('Carregue o arquivo de pagamentos.'); return;
+        }
 
-        let saldo = parseFloat(contract.valorOriginal);
-        const taxa = parseFloat(contract.taxaJuros) / 100;
+        let saldo = valorOriginal;
         const newEvolution = [];
         let totalPago = 0;
-        let totalRestituir = 0;
 
-        // Sort payments by date
         const sortedPayments = [...payments].sort((a, b) => new Date(a.dataCompetencia) - new Date(b.dataCompetencia));
 
         sortedPayments.forEach((payment) => {
-            const valorPago = parseFloat(payment.valorLiquido);
+            // Sanitiza o valor do pagamento (que agora está em formato BRL string)
+            const valorPago = parseCurrencyToFloat(payment.valorLiquido);
             totalPago += valorPago;
 
             const saldoAnterior = saldo;
-
-            // Juros do Mês = Saldo Anterior * Taxa
-            // Se Saldo Anterior < 0, Juros também serão negativos (crédito)
             const juros = saldoAnterior * taxa;
-
-            // Amortização = Pagamento - Juros do Mês
             const amortizacao = valorPago - juros;
-
-            // Saldo Devedor Atual = Saldo Anterior - Amortização
             saldo = saldoAnterior - amortizacao;
 
-            // Cálculo da Restituição (Indébito)
             let baseRestituicao = 0;
-
-            if (saldoAnterior > 0) {
-                // Se (Saldo Anterior > 0), então (Pagamento - (Juros + Amortização necessária para zerar))
-                // Amortização necessária para zerar é o próprio Saldo Anterior.
-                // Então: Pagamento - (Juros + Saldo Anterior)
-                // Se o resultado for negativo, significa que não houve pagamento em excesso suficiente para gerar restituição neste mês.
-                const excesso = valorPago - (juros + saldoAnterior);
-                baseRestituicao = excesso > 0 ? excesso : 0;
-            } else {
-                // senão (Pagamento + Juros a favor do cliente)
-                // Juros aqui é negativo, então usamos Math.abs(juros) para somar "a favor"
-                baseRestituicao = valorPago + Math.abs(juros);
+            if (saldoAnterior < 0) {
+                baseRestituicao = valorPago;
+            } else if (saldo < 0 && saldoAnterior > 0) {
+                baseRestituicao = Math.abs(saldo);
             }
 
-            // Regra do Dobro
-            let valorRestituirAtualizado = baseRestituicao;
+            let valorRestituirMes = 0;
             const dataPagamento = new Date(payment.dataCompetencia);
             const dataCorte = new Date('2021-03-30');
 
-            if (contract.restituicaoDobro && dataPagamento > dataCorte) {
-                valorRestituirAtualizado = baseRestituicao * 2;
+            if (contract.restituicaoDobro && dataPagamento > dataCorte && baseRestituicao > 0) {
+                valorRestituirMes = baseRestituicao;
             }
-
-            totalRestituir += valorRestituirAtualizado;
 
             newEvolution.push({
                 id: payment.id,
@@ -196,240 +361,262 @@ export default function CalculatorComponent() {
                 amortizacao,
                 saldoAtual: saldo,
                 valorPago,
-                valorRestituir: valorRestituirAtualizado
+                valorRestituir: valorRestituirMes
             });
         });
 
-        setEvolution(newEvolution);
+        const saldoFinal = saldo;
+        const totalDobras = newEvolution.reduce((acc, cur) => acc + cur.valorRestituir, 0);
 
+        let valorFinalRestituir = 0;
+        if (saldoFinal < 0) {
+            valorFinalRestituir = Math.abs(saldoFinal) + totalDobras;
+        }
+
+        setEvolution(newEvolution);
         setSummary({
             totalPago,
-            saldoDevedorAtual: saldo > 0 ? saldo : 0,
-            valorRestituir: totalRestituir
+            saldoDevedorAtual: saldoFinal > 0 ? saldoFinal : 0,
+            valorRestituir: valorFinalRestituir
         });
     };
 
-    const formatCurrency = (value) => {
-        return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
-    };
-
-    const formatDate = (dateString) => {
-        return new Date(dateString).toLocaleDateString('pt-BR');
-    };
+    const fmtBRL = (v) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v);
+    const fmtDate = (d) => { const dt = new Date(d); return new Date(dt.valueOf() + dt.getTimezoneOffset() * 60000).toLocaleDateString('pt-BR'); };
 
     return (
-        <div className="container">
-            <div className="header">
-                <h1>Calculadora RMC</h1>
-                <p>Recálculo de Dívidas de Cartão de Crédito Consignado</p>
-            </div>
+        <div className="dashboard-wrapper">
+            <div className="dashboard-container">
+                <h1 className="main-title">Dados para Análise</h1>
 
-            <div className="card">
-                <div className="header" style={{ textAlign: 'left', marginBottom: '1rem' }}>
-                    <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.5rem' }}>
-                        <User className="icon" /> Dados do Cliente
-                    </h2>
-                </div>
-                <div className="form-grid">
-                    <div className="form-group">
-                        <label>Nome Completo</label>
-                        <input
-                            type="text"
-                            value={client.nome}
-                            onChange={(e) => setClient({ ...client, nome: e.target.value })}
-                            placeholder="Ex: João da Silva"
-                        />
+                <section className="form-section">
+                    <h3 className="section-title">Informações do Cliente</h3>
+                    <div className="form-row-2">
+                        <div className="input-group">
+                            <label>Nome do Cliente/Autor</label>
+                            <div className="input-icon-wrapper"><User className="input-icon" /><input type="text" value={client.nome} onChange={e => setClient({ ...client, nome: e.target.value })} /></div>
+                        </div>
+                        <div className="input-group">
+                            <label>Nº CPF</label>
+                            <input type="text" value={client.cpf} onChange={e => setClient({ ...client, cpf: e.target.value })} />
+                        </div>
                     </div>
-                    <div className="form-group">
-                        <label>CPF</label>
-                        <input
-                            type="text"
-                            value={client.cpf}
-                            onChange={(e) => setClient({ ...client, cpf: e.target.value })}
-                            placeholder="000.000.000-00"
-                        />
-                    </div>
-                </div>
-            </div>
+                </section>
 
-            <div className="card">
-                <div className="header" style={{ textAlign: 'left', marginBottom: '1rem' }}>
-                    <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.5rem' }}>
-                        <FileText className="icon" /> Dados do Contrato
-                    </h2>
-                </div>
-                <div className="form-grid">
-                    <div className="form-group">
-                        <label>Valor Original Disponibilizado</label>
-                        <div style={{ position: 'relative' }}>
-                            <DollarSign className="icon" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-light)' }} />
-                            <input
-                                type="number"
-                                style={{ paddingLeft: '2.5rem' }}
-                                value={contract.valorOriginal}
-                                onChange={(e) => setContract({ ...contract, valorOriginal: e.target.value })}
-                                placeholder="0,00"
-                            />
+                <section className="form-section">
+                    <h3 className="section-title">Informações do Contrato</h3>
+                    <div className="form-row-2">
+                        <div className="input-group">
+                            <label>Valor do Empréstimo Disponibilizado (R$)</label>
+                            <div className="input-icon-wrapper">
+                                <DollarSign className="input-icon" />
+                                <input
+                                    type="text"
+                                    placeholder="R$ 0,00"
+                                    value={contract.valorOriginal}
+                                    onChange={e => handleMoneyChange('valorOriginal', e.target.value)}
+                                />
+                            </div>
+                        </div>
+                        <div className="input-group">
+                            <label>Data do Contrato</label>
+                            <div className="input-icon-wrapper"><Calendar className="input-icon" /><input type="date" value={contract.dataInicio} onChange={e => setContract({ ...contract, dataInicio: e.target.value })} /></div>
                         </div>
                     </div>
-                    <div className="form-group">
-                        <label>Data de Início</label>
-                        <div style={{ position: 'relative' }}>
-                            <Calendar className="icon" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-light)' }} />
-                            <input
-                                type="date"
-                                style={{ paddingLeft: '2.5rem' }}
-                                value={contract.dataInicio}
-                                onChange={(e) => setContract({ ...contract, dataInicio: e.target.value })}
-                            />
+                    <div className="form-row-2">
+                        <div className="input-group">
+                            <label>Valor da Parcela (Detectado) (R$)</label>
+                            <div className="input-icon-wrapper">
+                                <DollarSign className="input-icon" />
+                                <input
+                                    type="text"
+                                    placeholder="R$ 0,00"
+                                    value={contract.valorParcela}
+                                    onChange={e => handleMoneyChange('valorParcela', e.target.value)}
+                                />
+                            </div>
+                        </div>
+                        <div className="input-group">
+                            <label>Quantidade Parcelas (Detectado)</label>
+                            <input type="number" placeholder="Automático" value={contract.qtdParcelas} onChange={e => setContract({ ...contract, qtdParcelas: e.target.value })} />
                         </div>
                     </div>
-                    <div className="form-group">
-                        <label>Taxa de Juros BACEN (%)</label>
-                        <div style={{ position: 'relative' }}>
-                            <Percent className="icon" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-light)' }} />
-                            <input
-                                type="number"
-                                step="0.01"
-                                style={{ paddingLeft: '2.5rem' }}
-                                value={contract.taxaJuros}
-                                onChange={(e) => setContract({ ...contract, taxaJuros: e.target.value })}
-                                placeholder="Ex: 3.5"
-                            />
+
+                    <div className="form-row-2">
+                        <div className="input-group">
+                            <label>Modalidade</label>
+                            <input type="text" value="Cartão Consignado (RMC)" disabled className="input-disabled" />
+                        </div>
+                        <div className="input-group">
+                            <label>Taxa Média BACEN (% a.m.)</label>
+                            <div className="input-icon-wrapper">
+                                <Percent className="input-icon" />
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    placeholder={isFetchingRate ? "Buscando no BACEN..." : "Ex: 1.80"}
+                                    value={contract.taxaJuros}
+                                    onChange={e => setContract({ ...contract, taxaJuros: e.target.value })}
+                                    style={isFetchingRate ? { backgroundColor: '#fff3cd' } : {}}
+                                />
+                            </div>
+                            {isFetchingRate && <small style={{ color: '#d97706', fontSize: '0.8rem' }}>Consultando Série 25468...</small>}
                         </div>
                     </div>
-                    <div className="form-group" style={{ justifyContent: 'flex-end' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                            <input
-                                type="checkbox"
-                                style={{ width: 'auto' }}
-                                checked={contract.restituicaoDobro}
-                                onChange={(e) => setContract({ ...contract, restituicaoDobro: e.target.checked })}
-                            />
-                            Calcular Restituição em Dobro?
+                </section>
+
+                <section className="form-section">
+                    <h3 className="section-title">Histórico HISCRE</h3>
+                    <div className="upload-container">
+                        <input type="file" id="hiscre-upload-btn" hidden onChange={handleFileUpload} accept=".pdf,.txt,.csv,image/*" disabled={isProcessing} />
+                        <label htmlFor="hiscre-upload-btn" className={`upload-button-styled ${isProcessing ? 'disabled' : ''} ${payments.length > 0 ? 'success' : ''}`}>
+                            {isProcessing ? <RefreshCw className="spin" /> : payments.length > 0 ? <CheckCircle /> : <Upload />}
+                            <span>{isProcessing ? `Lendo... ${progressStatus}` : payments.length > 0 ? `${payments.length} parcelas lidas` : "Carregar PDF/Imagem"}</span>
                         </label>
+                        {uploadError && <div className="error-message"><AlertCircle size={16} />{uploadError}</div>}
                     </div>
-                </div>
+                </section>
 
-                <div className="form-group">
-                    <label>Arquivo HISCRE (PDF ou TXT)</label>
-                    <div className={`file-upload ${isProcessing ? 'processing' : ''}`}>
-                        <input
-                            type="file"
-                            id="hiscre-upload"
-                            style={{ display: 'none' }}
-                            onChange={handleFileUpload}
-                            accept=".csv,.txt,.pdf"
-                            disabled={isProcessing}
-                        />
-                        <label htmlFor="hiscre-upload" style={{ cursor: isProcessing ? 'wait' : 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-                            {isProcessing ? (
-                                <RefreshCw className="icon spin" style={{ width: '2rem', height: '2rem', color: 'var(--primary)', animation: 'spin 1s linear infinite' }} />
-                            ) : (
-                                <Upload className="icon" style={{ width: '2rem', height: '2rem', color: 'var(--primary)' }} />
-                            )}
-                            <span style={{ color: 'var(--primary)', fontWeight: '600' }}>
-                                {isProcessing ? 'Processando arquivo...' : 'Clique para fazer upload'}
-                            </span>
-                            <span style={{ color: 'var(--text-light)', fontSize: '0.8rem' }}>
-                                Busca automática por "217" ou "EMPRESTIMO SOBRE A RMC"
-                            </span>
-                        </label>
+                <section className="form-section">
+                    <div className="checkbox-group">
+                        <input type="checkbox" id="dobroCheck" checked={contract.restituicaoDobro} onChange={e => setContract({ ...contract, restituicaoDobro: e.target.checked })} />
+                        <label htmlFor="dobroCheck">Calcular Restituição em Dobro (pós-2021)</label>
                     </div>
+                </section>
 
-                    {uploadError && (
-                        <div style={{ marginTop: '1rem', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <AlertCircle className="icon" /> {uploadError}
-                        </div>
-                    )}
-
-                    {payments.length > 0 && (
-                        <div style={{ marginTop: '1rem', color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <CheckCircle className="icon" /> {payments.length} pagamentos extraídos com sucesso!
-                        </div>
-                    )}
-
-                    <div style={{ marginTop: '1rem' }}>
-                        <label style={{ fontSize: '0.9rem', color: 'var(--text-light)' }}>Texto Extraído (Debug)</label>
-                        <textarea
-                            value={debugText}
-                            readOnly
-                            style={{ width: '100%', height: '150px', marginTop: '0.5rem', padding: '0.5rem', fontSize: '0.8rem', fontFamily: 'monospace', border: '1px solid var(--border)', borderRadius: '0.5rem' }}
-                            placeholder="O texto extraído do arquivo aparecerá aqui..."
-                        />
-                    </div>
-                </div>
-
-                <div style={{ marginTop: '2rem', textAlign: 'right' }}>
-                    <button className="btn btn-primary" onClick={calculate}>
-                        <Calculator className="icon" /> Calcular Evolução
+                <div className="form-row-2 action-buttons">
+                    <button className="btn-primary-green" onClick={calculate} disabled={payments.length === 0 || isProcessing}>
+                        Calcular Análise
                     </button>
+
+                    {evolution.length > 0 ? (
+                        <BlobProvider document={
+                            <ReportPDF
+                                client={client}
+                                contract={{
+                                    ...contract,
+                                    valorOriginal: parseCurrencyToFloat(contract.valorOriginal),
+                                    valorParcela: parseCurrencyToFloat(contract.valorParcela)
+                                }}
+                                summary={summary}
+                                evolution={evolution}
+                            />
+                        }>
+                            {({ blob, url, loading, error }) => {
+                                const handlePreview = () => {
+                                    if (url) {
+                                        window.open(url, '_blank');
+                                    }
+                                };
+
+                                return (
+                                    <button
+                                        className="btn-secondary-outline"
+                                        onClick={handlePreview}
+                                        disabled={loading || !url}
+                                    >
+                                        <Printer size={18} />
+                                        {loading ? 'Gerando...' : 'Visualizar Relatório PDF'}
+                                    </button>
+                                );
+                            }}
+                        </BlobProvider>
+                    ) : (
+                        <button className="btn-secondary-outline" disabled><Printer size={18} /> Gerar PDF</button>
+                    )}
                 </div>
-            </div>
 
-            {evolution.length > 0 && (
-                <>
-                    <div className="summary-cards">
-                        <div className="summary-card">
-                            <h3>Total Pago</h3>
-                            <div className="value">{formatCurrency(summary.totalPago)}</div>
+                {evolution.length > 0 && (
+                    <div style={{ marginTop: '3rem', borderTop: '2px solid #eee', paddingTop: '2rem' }}>
+                        <h2 style={{ color: 'var(--primary-color)' }}>Resultado da Análise</h2>
+                        <div className="form-row-2" style={{ marginBottom: '2rem' }}>
+                            <div className="summary-box" style={{ background: '#e8f5e9', padding: '1.5rem', borderRadius: '8px' }}>
+                                <h3>Valor a Restituir</h3>
+                                <p style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--primary-color)' }}>{fmtBRL(summary.valorRestituir)}</p>
+                                {contract.restituicaoDobro && <small>Incluso dobra legal após 03/2021</small>}
+                            </div>
+                            <div className="summary-box" style={{ background: '#f5f5f5', padding: '1.5rem', borderRadius: '8px' }}>
+                                <h3>Saldo Devedor Real</h3>
+                                <p style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{fmtBRL(summary.saldoDevedorAtual)}</p>
+                                <small>Contra o saldo informado pelo banco</small>
+                            </div>
                         </div>
-                        <div className="summary-card">
-                            <h3>Saldo Devedor Atual (Recalculado)</h3>
-                            <div className="value">{formatCurrency(summary.saldoDevedorAtual)}</div>
-                        </div>
-                        <div className={`summary-card ${summary.valorRestituir > 0 ? 'highlight' : ''}`}>
-                            <h3>Valor a Restituir {contract.restituicaoDobro ? '(Em Dobro)' : ''}</h3>
-                            <div className="value">{formatCurrency(summary.valorRestituir)}</div>
-                        </div>
-                    </div>
-
-                    <div className="card" style={{ marginTop: '2rem' }}>
-                        <div className="header" style={{ textAlign: 'left', marginBottom: '1rem' }}>
-                            <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.5rem' }}>
-                                <RefreshCw className="icon" /> Evolução do Saldo
-                            </h2>
-                        </div>
-                        <div className="table-container">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Data</th>
-                                        <th>Saldo Anterior</th>
-                                        <th>Juros</th>
-                                        <th>Valor Pago</th>
-                                        <th>Amortização</th>
-                                        <th>Saldo Atual</th>
-                                        <th>Valor a Restituir</th>
-                                    </tr>
-                                </thead>
+                        <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                                <thead style={{ background: '#f0f2f5' }}><tr><th style={{ padding: 8, textAlign: 'left' }}>Data</th><th style={{ padding: 8, textAlign: 'right' }}>Pago</th><th style={{ padding: 8, textAlign: 'right' }}>Saldo Atualizado</th><th style={{ padding: 8, textAlign: 'right' }}>Restituição</th></tr></thead>
                                 <tbody>
-                                    {evolution.map((row) => (
-                                        <tr key={row.id}>
-                                            <td>{formatDate(row.dataReferencia)}</td>
-                                            <td>{formatCurrency(row.saldoAnterior)}</td>
-                                            <td style={{ color: 'var(--danger)' }}>+ {formatCurrency(row.juros)}</td>
-                                            <td style={{ color: 'var(--success)' }}>- {formatCurrency(row.valorPago)}</td>
-                                            <td style={{ color: row.amortizacao > 0 ? 'var(--success)' : 'var(--danger)' }}>
-                                                {formatCurrency(row.amortizacao)}
-                                            </td>
-                                            <td style={{ fontWeight: 'bold' }}>{formatCurrency(row.saldoAtual)}</td>
-                                            <td style={{ color: 'var(--primary)', fontWeight: 'bold' }}>{formatCurrency(row.valorRestituir)}</td>
+                                    {evolution.map(row => (
+                                        <tr key={row.id} style={{ borderBottom: '1px solid #eee' }}>
+                                            <td style={{ padding: 8 }}>{fmtDate(row.dataReferencia)}</td>
+                                            <td style={{ padding: 8, textAlign: 'right' }}>{fmtBRL(parseCurrencyToFloat(row.valorPago))}</td>
+                                            <td style={{ padding: 8, textAlign: 'right' }}>{fmtBRL(row.saldoAtual)}</td>
+                                            <td style={{ padding: 8, textAlign: 'right', color: 'var(--primary-color)', fontWeight: 'bold' }}>{fmtBRL(row.valorRestituir)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
                         </div>
                     </div>
-                </>
-            )}
+                )}
+            </div>
 
             <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
+                :root {
+                    --primary-color: #9cc094;
+                    --primary-dark: #82a37a;
+                    --text-dark: #333;
+                    --text-gray: #666;
+                    --bg-input: #f0f2f5;
+                    --border-color: #dce0e5;
+                }
+                .dashboard-wrapper { 
+                    font-family: 'Segoe UI', Roboto, sans-serif; 
+                    background-color: #f9fafb; 
+                    padding: 2rem; 
+                    display: flex; 
+                    justify-content: center; 
+                    min-height: 100vh;
+                    width: 100%;
+                    box-sizing: border-box;
+                }
+                .dashboard-container { 
+                    background-color: #fff; 
+                    padding: 2.5rem; 
+                    border-radius: 12px; 
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.08); 
+                    width: 100%; 
+                    max-width: 1200px;
+                }
+                .main-title { color: var(--text-dark); font-size: 1.8rem; margin-bottom: 2rem; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem; }
+                .section-title { color: var(--text-dark); font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; }
+                .form-section { margin-bottom: 2rem; }
+                .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1rem; }
+                @media (max-width: 768px) { .form-row-2 { grid-template-columns: 1fr; } }
+                .input-group { display: flex; flex-direction: column; }
+                .input-group label { font-size: 0.9rem; color: #666; margin-bottom: 0.5rem; font-weight: 500; }
+                .input-icon-wrapper { position: relative; display: flex; align-items: center; }
+                .input-icon { position: absolute; left: 12px; color: #9ca3af; width: 18px; height: 18px; }
+                input[type="text"], input[type="number"], input[type="date"] { width: 100%; padding: 0.75rem 1rem; padding-left: 2.5rem; background-color: var(--bg-input); border: 1px solid transparent; border-radius: 6px; font-size: 1rem; }
+                .input-group input:not(input[type="date"]){ padding-left: 1rem; }
+                .input-icon-wrapper input { padding-left: 2.5rem !important; }
+                input:focus { background-color: #fff; border-color: var(--primary-color); outline: none; box-shadow: 0 0 0 3px rgba(156, 192, 148, 0.2); }
+                .input-disabled { background-color: #e9ecef !important; color: #6c757d !important; cursor: not-allowed; }
+                .upload-button-styled { display: flex; align-items: center; justify-content: center; gap: 0.75rem; width: 100%; padding: 0.75rem; background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+                .upload-button-styled:hover { background-color: #e2e6ea; }
+                .upload-button-styled.success { background-color: #dcfce7; color: #166534; border-color: #86efac; }
+                .error-message { color: #dc2626; font-size: 0.9rem; margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
+                .checkbox-group { display: flex; align-items: center; gap: 0.75rem; }
+                .checkbox-group input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--primary-color); }
+                .action-buttons { margin-top: 2.5rem; }
+                .btn-primary-green { width: 100%; padding: 0.875rem; background-color: var(--primary-color); color: white; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+                .btn-primary-green:hover:not(:disabled) { background-color: var(--primary-dark); }
+                .btn-primary-green:disabled { opacity: 0.6; cursor: not-allowed; }
+                .btn-secondary-outline { width: 100%; padding: 0.875rem; background-color: transparent; color: #666; border: 1px solid var(--border-color); border-radius: 6px; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 0.5rem; transition: all 0.2s; }
+                .btn-secondary-outline:hover:not(:disabled) { background-color: var(--bg-input); color: var(--text-dark); }
+                .btn-secondary-outline:disabled { opacity: 0.6; cursor: not-allowed; }
+                .spin { animation: spin 1s linear infinite; }
+                @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+            `}</style>
         </div>
     );
 }
