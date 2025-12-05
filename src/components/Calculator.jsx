@@ -10,14 +10,15 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLi
 
 export default function CalculatorDashboard() {
     // --- ESTADOS ---
-    const [client, setClient] = useState({ nome: '', cpf: '' });
+    const [client, setClient] = useState({ nome: '', cpf: '', nascimento: '', beneficio: '' });
     const [contract, setContract] = useState({
         valorOriginal: '',
         dataInicio: '',
         valorParcela: '',
         qtdParcelas: '',
         taxaJuros: '',
-        restituicaoDobro: false
+        restituicaoDobro: false,
+        honorarios: ''
     });
     const [payments, setPayments] = useState([]);
     const [evolution, setEvolution] = useState([]);
@@ -60,6 +61,39 @@ export default function CalculatorDashboard() {
     const handleMoneyChange = (field, value) => {
         const formatted = formatCurrencyInput(value);
         setContract(prev => ({ ...prev, [field]: formatted }));
+    };
+
+    // --- HELPERS: MÁSCARAS DE INPUT (CPF/NB) ---
+    const formatCPF = (value) => {
+        const onlyDigits = value.replace(/\D/g, "");
+        const truncated = onlyDigits.substring(0, 11);
+        return truncated
+            .replace(/(\d{3})(\d)/, "$1.$2")
+            .replace(/(\d{3})(\d)/, "$1.$2")
+            .replace(/(\d{3})(\d{1,2})/, "$1-$2")
+            .replace(/(-\d{2})\d+?$/, "$1");
+    };
+
+    const formatNB = (value) => {
+        const onlyDigits = value.replace(/\D/g, "");
+        const truncated = onlyDigits.substring(0, 10);
+        return truncated
+            .replace(/(\d{3})(\d)/, "$1.$2")
+            .replace(/(\d{3})(\d)/, "$1.$2")
+            .replace(/(\d{3})(\d{1})/, "$1-$2");
+    };
+
+    const handleClientChange = (field, value) => {
+        let formattedValue = value;
+        if (field === 'cpf') {
+            formattedValue = formatCPF(value);
+        } else if (field === 'beneficio') {
+            formattedValue = formatNB(value);
+        } else {
+            // Para outros campos que não precisam de máscara específica
+            formattedValue = value;
+        }
+        setClient(prev => ({ ...prev, [field]: formattedValue }));
     };
 
     // --- 1. INTEGRAÇÃO BACEN ---
@@ -310,7 +344,7 @@ export default function CalculatorDashboard() {
     };
 
     const calculate = () => {
-        // 1. Sanitiza os INPUTS do usuário (que estão em formato BRL visual: "3.401,00")
+        // 1. Sanitiza os INPUTS do usuário
         const valorOriginal = parseCurrencyToFloat(contract.valorOriginal);
 
         // Se a taxa vier do input visual, sanitiza. Se vier da API (number), mantém.
@@ -334,67 +368,87 @@ export default function CalculatorDashboard() {
         let saldo = valorOriginal;
         const newEvolution = [];
         let totalPago = 0;
+        let totalIndebitoBase = 0; // Acumula o valor base do indébito (1x)
+        let totalDobras = 0; // Acumula apenas o valor ADICIONAL da dobra
 
         // Ordena Cronologicamente
         const sortedPayments = [...payments].sort((a, b) => new Date(a.dataCompetencia) - new Date(b.dataCompetencia));
 
-        sortedPayments.forEach((payment) => {
-            // --- CORREÇÃO CRÍTICA AQUI ---
-            // O valorLiquido vem do OCR como "112.35" (formato JS padrão). 
-            // NÃO usar parseCurrencyToFloat aqui, pois ele remove o ponto achando que é milhar.
-            const valorPago = parseFloat(payment.valorLiquido);
-            // -----------------------------
+        // Data de Corte STJ: 30/03/2021
+        const dataCorte = new Date('2021-03-30T00:00:00');
 
+        sortedPayments.forEach((payment, index) => {
+            const valorPago = parseFloat(payment.valorLiquido);
             totalPago += valorPago;
 
             const saldoAnterior = saldo;
+
+            // Juros incidem sobre o saldo ANTERIOR (seja devedor ou credor)
+            // Se saldoAnterior < 0 (crédito), juros serão negativos (aumentando o crédito)
             const juros = saldoAnterior * taxa;
-            const amortizacao = valorPago - juros;
 
-            saldo = saldoAnterior - amortizacao;
+            // Atualiza o saldo
+            // Saldo Atual = Saldo Anterior + Juros - Pagamento
+            let saldoAtual = saldoAnterior + juros - valorPago;
 
-            // Lógica de Restituição (Dobra)
-            let baseRestituicao = 0;
-            if (saldoAnterior < 0) {
-                baseRestituicao = valorPago;
-            } else if (saldo < 0 && saldoAnterior > 0) {
-                baseRestituicao = Math.abs(saldo);
+            // Lógica de Indébito (Excedente) para o RESUMO (não afeta a tabela de evolução simples)
+            let valorIndebito = 0;
+
+            if (saldoAtual < 0) {
+                // Se estamos no negativo...
+                if (saldoAnterior + juros > 0) {
+                    // Ponto de Virada: O pagamento quitou a dívida e sobrou um troco
+                    // Indébito é apenas a parte que excedeu zero (o saldo negativo final)
+                    valorIndebito = Math.abs(saldoAtual);
+                } else {
+                    // Dívida já estava quitada (ou crédito existente)
+                    // O pagamento inteiro é indevido
+                    valorIndebito = valorPago;
+                }
             }
 
-            let valorRestituirMes = 0;
-            const dataPagamento = new Date(payment.dataCompetencia);
-            const dataCorte = new Date('2021-03-30');
+            // Aplicação da Regra STJ (Apenas para o Resumo)
+            let parcelaDobra = 0;
 
-            if (contract.restituicaoDobro && dataPagamento > dataCorte && baseRestituicao > 0) {
-                valorRestituirMes = baseRestituicao;
+            if (valorIndebito > 0) {
+                // Verifica critério para Dobra:
+                // 1. Toggle Ativo
+                // 2. Data do Pagamento >= 30/03/2021
+                const dataPagamento = new Date(payment.dataCompetencia + 'T12:00:00');
+
+                if (contract.restituicaoDobro && dataPagamento >= dataCorte) {
+                    parcelaDobra = valorIndebito; // A dobra é +1x o valor
+                }
             }
 
+            // Acumuladores
+            totalIndebitoBase += valorIndebito;
+            totalDobras += parcelaDobra;
+            saldo = saldoAtual;
+
+            // Tabela AMORTIZAÇÃO
             newEvolution.push({
                 id: payment.id,
+                index: index + 1,
                 dataReferencia: payment.dataCompetencia,
                 saldoAnterior,
                 juros,
-                amortizacao,
+                amortizacao: valorPago - juros,
                 saldoAtual: saldo,
-                valorPago,
-                valorRestituir: valorRestituirMes
+                valorPago
             });
         });
 
-        // Totais Finais
-        const saldoFinal = saldo;
-        const totalDobras = newEvolution.reduce((acc, cur) => acc + cur.valorRestituir, 0);
-
-        // Se saldo final é negativo (credor), o cliente recebe o valor absoluto + as dobras
-        let valorFinalRestituir = 0;
-        if (saldoFinal < 0) {
-            valorFinalRestituir = Math.abs(saldoFinal) + totalDobras;
-        }
+        // Total Geral a Restituir = (Saldo Final da Tabela [já com juros]) + (Penalidade da Dobra)
+        // Se saldo < 0, o banco deve ao cliente.
+        const valorFinalRestituir = (saldo < 0 ? Math.abs(saldo) : 0) + totalDobras;
 
         setEvolution(newEvolution);
         setSummary({
             totalPago,
-            saldoDevedorAtual: saldoFinal > 0 ? saldoFinal : 0,
+            saldoDevedorAtual: saldo,
+            indebitoSimples: totalIndebitoBase,
+            totalDobras,
             valorRestituir: valorFinalRestituir
         });
     };
@@ -405,7 +459,7 @@ export default function CalculatorDashboard() {
     return (
         <div className="dashboard-wrapper">
             <div className="dashboard-container">
-                <h1 className="main-title">Dados para Análise</h1>
+                <h1 className="main-title">Análise de Amortização (RMC)</h1>
 
                 <section className="form-section">
                     <h3 className="section-title">Informações do Cliente</h3>
@@ -416,7 +470,27 @@ export default function CalculatorDashboard() {
                         </div>
                         <div className="input-group">
                             <label>Nº CPF</label>
-                            <input type="text" value={client.cpf} onChange={e => setClient({ ...client, cpf: e.target.value })} />
+                            <input
+                                type="text"
+                                value={client.cpf}
+                                onChange={e => handleClientChange('cpf', e.target.value)}
+                                placeholder="000.000.000-00"
+                            />
+                        </div>
+                    </div>
+                    {/* Linha Adicional para Benefício */}
+                    <div className="form-row-2">
+                        <div className="input-group">
+                            <label>Nº Benefício (NB)</label>
+                            <div className="input-icon-wrapper">
+                                <FileText className="input-icon" />
+                                <input
+                                    type="text"
+                                    value={client.beneficio || ''}
+                                    onChange={e => handleClientChange('beneficio', e.target.value)}
+                                    placeholder="000.000.000-0"
+                                />
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -508,24 +582,36 @@ export default function CalculatorDashboard() {
                     </button>
 
                     {evolution.length > 0 ? (
-                        <BlobProvider document={
-                            <ReportPDF
-                                client={client}
-                                contract={{
-                                    ...contract,
-                                    valorOriginal: parseCurrencyToFloat(contract.valorOriginal),
-                                    valorParcela: parseCurrencyToFloat(contract.valorParcela)
-                                }}
-                                summary={summary}
-                                evolution={evolution}
-                            />
-                        }>
+                        <BlobProvider
+                            key={summary.valorRestituir}
+                            document={
+                                <ReportPDF
+                                    client={client}
+                                    contract={{
+                                        ...contract,
+                                        valorOriginal: parseCurrencyToFloat(contract.valorOriginal),
+                                        valorParcela: parseCurrencyToFloat(contract.valorParcela)
+                                    }}
+                                    summary={summary}
+                                    evolution={evolution}
+                                />
+                            }
+                        >
                             {({ blob, url, loading, error }) => {
                                 const handlePreview = () => {
                                     if (url) {
                                         window.open(url, '_blank');
                                     }
                                 };
+
+                                if (error) {
+                                    return (
+                                        <div className="error-message">
+                                            <AlertCircle size={16} />
+                                            Erro ao gerar PDF: {error.message}
+                                        </div>
+                                    );
+                                }
 
                                 return (
                                     <button
@@ -534,7 +620,7 @@ export default function CalculatorDashboard() {
                                         disabled={loading || !url}
                                     >
                                         <Printer size={18} />
-                                        {loading ? 'Gerando...' : 'Visualizar Relatório PDF'}
+                                        {loading ? 'Gerando PDF...' : 'Visualizar Relatório PDF'}
                                     </button>
                                 );
                             }}
@@ -554,21 +640,34 @@ export default function CalculatorDashboard() {
                                 {contract.restituicaoDobro && <small>Incluso dobra legal após 03/2021</small>}
                             </div>
                             <div className="summary-box" style={{ background: '#f5f5f5', padding: '1.5rem', borderRadius: '8px' }}>
-                                <h3>Saldo Devedor Real</h3>
+                                <h3>Saldo Final</h3>
                                 <p style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{fmtBRL(summary.saldoDevedorAtual)}</p>
-                                <small>Contra o saldo informado pelo banco</small>
+                                <small>Saldo calculado após todos os pagamentos</small>
                             </div>
                         </div>
                         <div style={{ overflowX: 'auto' }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
-                                <thead style={{ background: '#f0f2f5' }}><tr><th style={{ padding: 8, textAlign: 'left' }}>Data</th><th style={{ padding: 8, textAlign: 'right' }}>Pago</th><th style={{ padding: 8, textAlign: 'right' }}>Saldo Atualizado</th><th style={{ padding: 8, textAlign: 'right' }}>Restituição</th></tr></thead>
+                                <thead style={{ background: '#f2f2f2' }}>
+                                    <tr>
+                                        <th style={{ padding: 12, textAlign: 'center', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>Parc.</th>
+                                        <th style={{ padding: 12, textAlign: 'center', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>Data</th>
+                                        <th style={{ padding: 12, textAlign: 'right', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>Saldo Ant.</th>
+                                        <th style={{ padding: 12, textAlign: 'right', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>Juros</th>
+                                        <th style={{ padding: 12, textAlign: 'right', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>Valor Pago</th>
+                                        <th style={{ padding: 12, textAlign: 'right', borderBottom: '1px solid #ddd', color: '#009e2a', whiteSpace: 'nowrap' }}>Amortização</th>
+                                        <th style={{ padding: 12, textAlign: 'right', borderBottom: '1px solid #ddd', whiteSpace: 'nowrap' }}>Saldo Atual</th>
+                                    </tr>
+                                </thead>
                                 <tbody>
-                                    {evolution.map(row => (
-                                        <tr key={row.id} style={{ borderBottom: '1px solid #eee' }}>
-                                            <td style={{ padding: 8 }}>{fmtDate(row.dataReferencia)}</td>
-                                            <td style={{ padding: 8, textAlign: 'right' }}>{fmtBRL(parseCurrencyToFloat(row.valorPago))}</td>
-                                            <td style={{ padding: 8, textAlign: 'right' }}>{fmtBRL(row.saldoAtual)}</td>
-                                            <td style={{ padding: 8, textAlign: 'right', color: 'var(--primary-color)', fontWeight: 'bold' }}>{fmtBRL(row.valorRestituir)}</td>
+                                    {evolution.map((row, i) => (
+                                        <tr key={row.id} style={{ borderBottom: '1px solid #e0e0e0', backgroundColor: i % 2 !== 0 ? '#EBF5FB' : '#fff' }}>
+                                            <td style={{ padding: 8, textAlign: 'center', whiteSpace: 'nowrap' }}>{row.index}</td>
+                                            <td style={{ padding: 8, textAlign: 'center', whiteSpace: 'nowrap' }}>{fmtDate(row.dataReferencia)}</td>
+                                            <td style={{ padding: 8, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtBRL(row.saldoAnterior)}</td>
+                                            <td style={{ padding: 8, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtBRL(row.juros)}</td>
+                                            <td style={{ padding: 8, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtBRL(parseCurrencyToFloat(row.valorPago))}</td>
+                                            <td style={{ padding: 8, textAlign: 'right', color: '#009e2a', fontWeight: 'bold', whiteSpace: 'nowrap' }}>{fmtBRL(row.amortizacao)}</td>
+                                            <td style={{ padding: 8, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtBRL(row.saldoAtual)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -635,6 +734,6 @@ export default function CalculatorDashboard() {
                 .spin { animation: spin 1s linear infinite; }
                 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
             `}</style>
-        </div>
+        </div >
     );
 }
