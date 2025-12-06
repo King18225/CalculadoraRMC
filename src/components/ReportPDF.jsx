@@ -1,83 +1,120 @@
 import React from 'react';
-import { Page, Text, View, Document, StyleSheet, Font } from '@react-pdf/renderer';
+import { Page, Text, View, Document, StyleSheet } from '@react-pdf/renderer';
 
-// --- ESTILOS GERAIS COMPACTOS E MINIMALISTAS ---
-const borderColor = '#e0e0e0';
+// --- ESTILOS PREMIUM / HIGH-END (Visual Jurídico) ---
+const mainDark = '#222222';  // Preto Suavizado
+const lineGrey = '#666666';  // Cinza Chumbo Fino
+const lightBg = '#fcfcfc';   // Fundo muito sutil
 
 const styles = StyleSheet.create({
     page: {
-        padding: 40,
-        fontSize: 8,
-        fontFamily: 'Helvetica',
-        color: '#333',
-        lineHeight: 1.4
+        paddingTop: 50,
+        paddingBottom: 50,
+        paddingHorizontal: 40,
+        fontSize: 10,
+        fontFamily: 'Helvetica', // Corpo Padrão Sans-Serif
+        color: mainDark,
+        lineHeight: 1.3
     },
 
-    // 1. CABEÇALHO
-    headerContainer: {
-        marginBottom: 25,
-        borderBottom: '1px solid #ddd',
-        paddingBottom: 10,
+    // --- RODAPÉ FIXO ---
+    footerContainer: {
+        position: 'absolute',
+        bottom: 25,
+        left: 40,
+        right: 40,
+        borderTop: `0.5pt solid ${lineGrey}`,
+        paddingTop: 8,
         flexDirection: 'row',
         justifyContent: 'space-between',
-        alignItems: 'flex-end'
+        alignItems: 'center'
     },
-    headerTitle: {
+    footerText: {
+        fontSize: 8,
+        color: '#666',
+        fontFamily: 'Helvetica'
+    },
+
+    // --- CABEÇALHO DA PÁGINA (Escritório / Título) ---
+    headerContainer: {
+        marginBottom: 30,
+        borderBottom: `0.5pt solid ${lineGrey}`,
+        paddingBottom: 15,
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center'
+    },
+    headerLogoBox: {
+        flexDirection: 'column'
+    },
+    headerLogoText: {
         fontSize: 14,
+        fontFamily: 'Times-Roman', // Branding Serifado
         fontWeight: 'bold',
-        color: '#000',
-        textTransform: 'uppercase'
+        textTransform: 'uppercase',
+        color: mainDark
+    },
+    headerSubTitle: {
+        fontSize: 10,
+        fontFamily: 'Times-Roman',
+        color: '#444',
+        marginTop: 4
     },
     headerDate: {
         fontSize: 8,
-        color: '#666'
+        fontFamily: 'Helvetica',
+        color: '#666',
+        textAlign: 'right'
     },
 
-    // 2. TÍTULOS DE SEÇÃO
+    // --- TÍTULOS DE SEÇÃO (SERIFADOS) ---
     sectionTitle: {
-        fontSize: 10,
+        fontSize: 11,
+        fontFamily: 'Times-Roman', // Autoridade Jurídica
         fontWeight: 'bold',
-        marginTop: 15,
-        marginBottom: 8,
+        marginTop: 18,
+        marginBottom: 6,
         textTransform: 'uppercase',
-        color: '#000',
-        borderBottom: '1px solid #000',
+        color: mainDark,
+        borderBottom: `0.5pt solid ${lineGrey}`,
         width: '100%',
-        paddingBottom: 2
+        paddingBottom: 3
     },
 
-    // 3. TABELAS DE DADOS
+    // --- TABELAS GERAIS ---
     dataTable: {
         width: '100%',
         marginBottom: 15,
+        // Sem bordas externas
     },
     dataRow: {
         flexDirection: 'row',
-        paddingVertical: 4,
+        paddingVertical: 3,
         alignItems: 'center'
     },
     dataLabel: {
         width: '35%',
         fontSize: 9,
-        fontWeight: 'bold',
+        fontWeight: 'bold', // Helvetica-Bold implícito
         color: '#444'
     },
     dataValue: {
         width: '65%',
         fontSize: 9,
-        color: '#000'
+        color: mainDark
+        // Helvetica normal
     },
 
-    // 4. QUADRO DE RESULTADO
+    // --- RESUMO DO RESULTADO ---
     summaryTable: {
         marginTop: 5,
         marginBottom: 20,
-        borderBottom: '1px solid #000'
+        borderBottom: `0.5pt solid ${mainDark}` // Linha de fechamento sutil
     },
     summaryRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        paddingVertical: 6,
+        paddingVertical: 5,
     },
     summaryLabel: {
         fontSize: 10,
@@ -87,58 +124,55 @@ const styles = StyleSheet.create({
     summaryValue: {
         fontSize: 10,
         fontWeight: 'bold',
-        color: '#000',
+        color: mainDark,
         width: '40%',
         textAlign: 'right'
     },
-    // Estilo removido pois a linha Total foi removida, mas mantendo para compatibilidade se precisar voltar
 
-    // 5. TABELA DE EVOLUÇÃO (GRID FULL)
-
+    // --- TABELA DE EVOLUÇÃO (GRID FINO) ---
     evolutionHeader: {
         flexDirection: 'row',
-        backgroundColor: '#f4f4f4',
-        borderTop: `1px solid ${borderColor}`,
-        borderBottom: `1px solid ${borderColor}`,
-        borderLeft: `1px solid ${borderColor}`,
+        backgroundColor: '#f2f2f2',
+        borderTop: `0.5pt solid ${lineGrey}`,
+        borderBottom: `0.5pt solid ${lineGrey}`,
+        borderLeft: `0.5pt solid ${lineGrey}`,
         marginTop: 10,
         alignItems: 'stretch'
     },
     evolutionRow: {
         flexDirection: 'row',
-        borderBottom: `1px solid ${borderColor}`,
-        borderLeft: `1px solid ${borderColor}`,
+        borderBottom: `0.5pt solid ${lineGrey}`,
+        borderLeft: `0.5pt solid ${lineGrey}`,
         alignItems: 'stretch'
     },
     evolutionFooterRow: {
         flexDirection: 'row',
-        borderBottom: `1px solid ${borderColor}`,
-        borderLeft: `1px solid ${borderColor}`,
+        borderBottom: `0.5pt solid ${lineGrey}`,
+        borderLeft: `0.5pt solid ${lineGrey}`,
         alignItems: 'stretch',
-        backgroundColor: '#f9f9f9',
-        borderTop: '1px solid #000'
+        backgroundColor: '#fafafa',
+        borderTop: `0.5pt solid #222` // Destaque para o total
     },
 
     cellStyle: {
-        borderRight: `1px solid ${borderColor}`,
+        borderRight: `0.5pt solid ${lineGrey}`,
         paddingVertical: 4,
-        paddingHorizontal: 2,
-        fontSize: 6.5,
+        paddingHorizontal: 3,
+        fontSize: 7, // Numérico pequeno e limpo
     },
 
-    // Colunas Evolução
+    // Colunas
     colIdx: { width: '5%', textAlign: 'center', fontWeight: 'bold' },
     colData: { width: '10%', textAlign: 'center' },
     colRMC: { width: '11%', textAlign: 'right' },
     colSaldoAnt: { width: '13%', textAlign: 'right' },
     colTaxa: { width: '6%', textAlign: 'center' },
     colJuros: { width: '10%', textAlign: 'right' },
-    colAmort: { width: '10%', textAlign: 'right', color: '#009e2a', fontWeight: 'bold' },
-    colRestituir: { width: '15%', textAlign: 'right', color: '#d32f2f', fontWeight: 'bold' },
+    colAmort: { width: '10%', textAlign: 'right', color: '#1b5e20', fontWeight: 'bold' }, // Verde floresta escuro
+    colRestituir: { width: '15%', textAlign: 'right', color: '#b71c1c', fontWeight: 'bold' }, // Vermelho sangue escuro
     colSaldoAtual: { width: '20%', textAlign: 'right', fontWeight: 'bold' },
 
-    // Header Text
-    headerText: { fontWeight: 'bold', color: '#000', textAlign: 'center', lineHeight: 1.2 }
+    headerText: { fontWeight: 'bold', color: mainDark, textAlign: 'center', lineHeight: 1.1, fontFamily: 'Helvetica' }
 });
 
 // Formatadores
@@ -189,10 +223,27 @@ export const ReportPDF = ({ client, contract, summary, evolution }) => {
         <Document>
             <Page size="A4" style={styles.page}>
 
-                {/* 1. CABEÇALHO */}
+                {/* RODAPÉ FIXO (Em todas as páginas) */}
+                <View style={styles.footerContainer} fixed>
+                    <Text style={styles.footerText}>Relatório Técnico Pericial - RMC</Text>
+                    <Text style={styles.footerText} render={({ pageNumber, totalPages }) => (
+                        `Página ${pageNumber} de ${totalPages}`
+                    )} fixed />
+                </View>
+
+                {/* 1. CABEÇALHO (Apenas na página 1, ou repetido? Geralmente logo é pág 1) 
+                    Vamos deixar fixo? O usuário disse 'Na primeira página...'. 
+                    Então sem 'fixed'.
+                */}
                 <View style={styles.headerContainer}>
-                    <Text style={styles.headerTitle}>Cálculo de Revisão da RMC</Text>
-                    <Text style={styles.headerDate}>Relatório gerado em: {fmtDateTime()}</Text>
+                    <View style={styles.headerLogoBox}>
+                        <Text style={styles.headerLogoText}>SEU ESCRITÓRIO DE ADVOCACIA</Text>
+                        <Text style={styles.headerSubTitle}>EXCELÊNCIA EM CÁLCULOS JURÍDICOS</Text>
+                    </View>
+                    <View>
+                        <Text style={[styles.headerLogoText, { fontSize: 10, textAlign: 'right' }]}>LAUDO TÉCNICO</Text>
+                        <Text style={styles.headerDate}>{fmtDateTime()}</Text>
+                    </View>
                 </View>
 
                 {/* 2. DADOS DO CLIENTE */}
@@ -234,7 +285,7 @@ export const ReportPDF = ({ client, contract, summary, evolution }) => {
                     </View>
                 </View>
 
-                {/* 5. QUADRO DE RESULTADO - ATUALIZADO */}
+                {/* 5. QUADRO DE RESULTADO */}
                 <Text style={styles.sectionTitle}>Resumo do Resultado</Text>
                 <View style={styles.summaryTable}>
                     <View style={styles.summaryRow}>
@@ -286,8 +337,8 @@ export const ReportPDF = ({ client, contract, summary, evolution }) => {
                     <Text style={[styles.cellStyle, styles.colSaldoAnt]}></Text>
                     <Text style={[styles.cellStyle, styles.colTaxa]}></Text>
                     <Text style={[styles.cellStyle, styles.colJuros, { fontWeight: 'bold' }]}>{fmtBRL(totalJuros)}</Text>
-                    <Text style={[styles.cellStyle, styles.colAmort, { fontWeight: 'bold', color: '#009e2a' }]}>{fmtBRL(totalAmortizado)}</Text>
-                    <Text style={[styles.cellStyle, styles.colRestituir, { fontWeight: 'bold', color: '#d32f2f' }]}>{fmtBRL(totalRestituir)}</Text>
+                    <Text style={[styles.cellStyle, styles.colAmort, { fontWeight: 'bold', color: '#1b5e20' }]}>{fmtBRL(totalAmortizado)}</Text>
+                    <Text style={[styles.cellStyle, styles.colRestituir, { fontWeight: 'bold', color: '#b71c1c' }]}>{fmtBRL(totalRestituir)}</Text>
 
                     <Text style={[styles.cellStyle, styles.colSaldoAtual]}></Text>
                 </View>
