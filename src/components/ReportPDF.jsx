@@ -72,7 +72,6 @@ const styles = StyleSheet.create({
     summaryTable: {
         marginTop: 5,
         marginBottom: 20,
-        // SEM BORDER TOP (Para evitar duplicidade com a linha do Título)
         borderBottom: '1px solid #000'
     },
     summaryRow: {
@@ -92,26 +91,7 @@ const styles = StyleSheet.create({
         width: '40%',
         textAlign: 'right'
     },
-    summaryTotalRow: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        paddingVertical: 8,
-        backgroundColor: '#f8f8f8',
-        paddingHorizontal: 5,
-        borderTop: '1px solid #000' // Linha de destaque do Total
-    },
-    summaryTotalLabel: {
-        fontSize: 11,
-        fontWeight: 'bold',
-        textTransform: 'uppercase',
-        width: '60%'
-    },
-    summaryTotalValue: {
-        fontSize: 12,
-        fontWeight: 'bold',
-        width: '40%',
-        textAlign: 'right'
-    },
+    // Estilo removido pois a linha Total foi removida, mas mantendo para compatibilidade se precisar voltar
 
     // 5. TABELA DE EVOLUÇÃO (GRID FULL)
 
@@ -254,20 +234,16 @@ export const ReportPDF = ({ client, contract, summary, evolution }) => {
                     </View>
                 </View>
 
-                {/* 5. QUADRO DE RESULTADO */}
+                {/* 5. QUADRO DE RESULTADO - ATUALIZADO */}
                 <Text style={styles.sectionTitle}>Resumo do Resultado</Text>
                 <View style={styles.summaryTable}>
                     <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Valor</Text>
-                        <Text style={styles.summaryValue}>{fmtBRL(summary.valorRestituir)}</Text>
+                        <Text style={styles.summaryLabel}>Valor pago</Text>
+                        <Text style={styles.summaryValue}>{fmtBRL(totalPago)}</Text>
                     </View>
                     <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Subtotal</Text>
-                        <Text style={styles.summaryValue}>{fmtBRL(summary.valorRestituir)}</Text>
-                    </View>
-                    <View style={styles.summaryTotalRow}>
-                        <Text style={styles.summaryTotalLabel}>Total</Text>
-                        <Text style={styles.summaryTotalValue}>{fmtBRL(summary.valorRestituir)}</Text>
+                        <Text style={styles.summaryLabel}>Valor a restituir (em dobro a partir da quitação)</Text>
+                        <Text style={[styles.summaryValue, { fontWeight: 'bold' }]}>{fmtBRL(summary.valorRestituir)}</Text>
                     </View>
                 </View>
 
